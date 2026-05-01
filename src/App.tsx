@@ -8,6 +8,7 @@ interface Card {
   image?: string;
   text?: string;
   next?: string[];
+  discard?: string[];
 }
 
 interface Scenario {
@@ -275,23 +276,30 @@ interface GameScreenProps {
   onBack: () => void;
 }
 
-function buildInitialItems(
+function buildInitialState(
   scenario: Scenario,
   cardMap: Map<string, Card>
-): TreeItem[] {
+): { items: TreeItem[]; discarded: Set<string> } {
+  const initCard = cardMap.get(scenario.init);
+  const discarded = new Set<string>(initCard?.discard ?? []);
   const items: TreeItem[] = [
     { id: scenario.init, col: 0, opened: true, parentId: null },
   ];
-  cardMap.get(scenario.init)?.next?.forEach((nextId) => {
-    items.push({ id: nextId, col: 1, opened: false, parentId: scenario.init });
+  initCard?.next?.forEach((nextId) => {
+    if (!discarded.has(nextId)) {
+      items.push({ id: nextId, col: 1, opened: false, parentId: scenario.init });
+    }
   });
-  return items;
+  return { items, discarded };
 }
 
 function GameScreen({ scenario, scenarioDir, onBack }: GameScreenProps) {
   const cardMap = new Map(scenario.cards.map((c) => [c.id, c]));
-  const [treeItems, setTreeItems] = useState<TreeItem[]>(() =>
-    buildInitialItems(scenario, cardMap)
+  const [treeItems, setTreeItems] = useState<TreeItem[]>(
+    () => buildInitialState(scenario, cardMap).items
+  );
+  const [discarded, setDiscarded] = useState<Set<string>>(
+    () => buildInitialState(scenario, cardMap).discarded
   );
   const [selectedCard, setSelectedCard] = useState<string | null>(scenario.init);
   const gameBgRef = useRef<HTMLDivElement>(null);
@@ -303,40 +311,55 @@ function GameScreen({ scenario, scenarioDir, onBack }: GameScreenProps) {
   }, [scenario.style]);
 
   function handleCardClick(id: string) {
-    setTreeItems((prev) => {
-      const item = prev.find((t) => t.id === id);
-      if (!item || item.opened) return prev;
+    const item = treeItems.find((t) => t.id === id);
+    if (!item) return;
+    if (item.opened) {
+      setSelectedCard(id);
+      return;
+    }
 
-      // Effective col at open time: max opened parent col + 1
-      let maxParentCol = -1;
-      prev.forEach((other) => {
-        if (other.opened && cardMap.get(other.id)?.next?.includes(id)) {
-          if (other.col > maxParentCol) maxParentCol = other.col;
-        }
-      });
-      const effectiveCol = maxParentCol >= 0 ? maxParentCol + 1 : item.col;
+    const card = cardMap.get(id);
 
-      // Mark card as opened with the effective column
-      const updated = prev.map((t) =>
+    // Effective col at open time: max opened parent col + 1
+    let maxParentCol = -1;
+    treeItems.forEach((other) => {
+      if (other.opened && cardMap.get(other.id)?.next?.includes(id)) {
+        if (other.col > maxParentCol) maxParentCol = other.col;
+      }
+    });
+    const effectiveCol = maxParentCol >= 0 ? maxParentCol + 1 : item.col;
+
+    // Compute newly discarded ids (skip those already opened)
+    const newlyDiscarded = new Set<string>();
+    card?.discard?.forEach((dId) => {
+      const dItem = treeItems.find((t) => t.id === dId);
+      if (!dItem?.opened) newlyDiscarded.add(dId);
+    });
+
+    // Remove discarded items from tree, then mark this card as opened
+    let updated = treeItems
+      .filter((t) => !newlyDiscarded.has(t.id))
+      .map((t) =>
         t.id === id ? { ...t, opened: true, col: effectiveCol } : t
       );
 
-      // Add its next cards as potential (if not already in tree)
-      const existingIds = new Set(updated.map((t) => t.id));
-      cardMap.get(id)?.next?.forEach((nextId) => {
-        if (!existingIds.has(nextId)) {
-          updated.push({
-            id: nextId,
-            col: effectiveCol + 1,
-            opened: false,
-            parentId: id,
-          });
-          existingIds.add(nextId);
-        }
-      });
-
-      return updated;
+    // Add next cards as potential (skipping discarded)
+    const allDiscarded = new Set([...discarded, ...newlyDiscarded]);
+    const existingIds = new Set(updated.map((t) => t.id));
+    card?.next?.forEach((nextId) => {
+      if (!existingIds.has(nextId) && !allDiscarded.has(nextId)) {
+        updated.push({
+          id: nextId,
+          col: effectiveCol + 1,
+          opened: false,
+          parentId: id,
+        });
+        existingIds.add(nextId);
+      }
     });
+
+    setTreeItems(updated);
+    if (newlyDiscarded.size > 0) setDiscarded(allDiscarded);
     setSelectedCard(id);
   }
 
