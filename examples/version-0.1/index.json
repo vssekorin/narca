@@ -1,8 +1,6 @@
 {
     "title": "Сценарий без использования файлов",
-    "style": {
-        "background-style": "background: linear-gradient(135deg, #f5f0e8 0%, #e8e2d9 100%);"
-    },
+    "style": "background-color: #121212;",
     "init": "S",
     "cards": [
         {
