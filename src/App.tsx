@@ -18,9 +18,12 @@ interface Scenario {
   cards: Card[];
 }
 
-// A card that has appeared in the tree (opened or potential)
+// An entry in the tree. Opened cards appear once per cardId.
+// Potential cards appear once per parent->cardId link (so the same cardId
+// can have multiple potential entries until it is opened).
 interface TreeItem {
-  id: string;
+  key: string;
+  cardId: string;
   col: number;
   opened: boolean;
   parentId: string | null;
@@ -31,6 +34,11 @@ const CARD_SIZE = 80;
 const COL_GAP = 52;
 const ROW_GAP = 16;
 const PAD = 28;
+
+let keyCounter = 0;
+function nextKey(): string {
+  return `k${++keyCounter}`;
+}
 
 // --- Lazy image ---
 
@@ -64,53 +72,61 @@ function CardImage({
 
 interface TreeProps {
   items: TreeItem[];
-  cardMap: Map<string, Card>;
   selectedCard: string | null;
-  onCardClick: (id: string) => void;
+  onCardClick: (key: string) => void;
 }
 
-function Tree({ items, cardMap, selectedCard, onCardClick }: TreeProps) {
-  // For potential cards: effective col = max(opened parent col) + 1
-  const effectiveCols = new Map<string, number>(items.map((t) => [t.id, t.col]));
+function Tree({ items, selectedCard, onCardClick }: TreeProps) {
+  const openedByCardId = new Map<string, TreeItem>();
+  items.forEach((t) => {
+    if (t.opened) openedByCardId.set(t.cardId, t);
+  });
+
+  // Effective col: opened items use their stored col;
+  // potential items sit one column right of their (opened) parent.
+  const effectiveCols = new Map<string, number>();
   items.forEach((item) => {
-    if (!item.opened) {
-      let maxParentCol = -1;
-      items.forEach((other) => {
-        if (other.opened && cardMap.get(other.id)?.next?.includes(item.id)) {
-          if (other.col > maxParentCol) maxParentCol = other.col;
-        }
-      });
-      if (maxParentCol >= 0) effectiveCols.set(item.id, maxParentCol + 1);
+    if (item.opened) {
+      effectiveCols.set(item.key, item.col);
+    } else {
+      const parent = item.parentId ? openedByCardId.get(item.parentId) : null;
+      effectiveCols.set(item.key, parent ? parent.col + 1 : item.col);
     }
   });
 
-  // Map each card to its row index within its effective column
   const colRows = new Map<number, string[]>();
   items.forEach((item) => {
-    const col = effectiveCols.get(item.id)!;
+    const col = effectiveCols.get(item.key)!;
     if (!colRows.has(col)) colRows.set(col, []);
-    colRows.get(col)!.push(item.id);
+    colRows.get(col)!.push(item.key);
   });
 
-  // Compute absolute position for each card
-  function cardPos(id: string) {
-    const col = effectiveCols.get(id)!;
-    const row = colRows.get(col)!.indexOf(id);
+  function cardPos(key: string) {
+    const col = effectiveCols.get(key)!;
+    const row = colRows.get(col)!.indexOf(key);
     return {
       x: PAD + col * (CARD_SIZE + COL_GAP),
       y: PAD + row * (CARD_SIZE + ROW_GAP),
     };
   }
 
-  // Tree canvas dimensions
   const maxCol = effectiveCols.size > 0 ? Math.max(...effectiveCols.values()) : 0;
   const maxRows = colRows.size > 0 ? Math.max(...[...colRows.values()].map((v) => v.length)) : 1;
   const W = PAD * 2 + (maxCol + 1) * CARD_SIZE + maxCol * COL_GAP;
   const H = PAD * 2 + maxRows * CARD_SIZE + Math.max(0, maxRows - 1) * ROW_GAP;
 
+  // Arrows: each item (opened or potential) is linked to the one parent it
+  // originated from.
+  const arrows: { fromKey: string; toKey: string }[] = [];
+  items.forEach((item) => {
+    if (!item.parentId) return;
+    const parent = openedByCardId.get(item.parentId);
+    if (!parent) return;
+    arrows.push({ fromKey: parent.key, toKey: item.key });
+  });
+
   return (
     <div className="tree" style={{ width: W, height: H }}>
-      {/* SVG layer for arrows */}
       <svg
         className="tree-svg"
         width={W}
@@ -129,60 +145,45 @@ function Tree({ items, cardMap, selectedCard, onCardClick }: TreeProps) {
             <polygon points="0 0, 7 3.5, 0 7" fill="rgba(90,140,220,0.5)" />
           </marker>
         </defs>
-        {(() => {
-          const itemIds = new Set(items.map((t) => t.id));
-          const arrows: { from: TreeItem; to: TreeItem }[] = [];
-          items
-            .filter((t) => t.opened)
-            .forEach((opened) => {
-              cardMap.get(opened.id)?.next?.forEach((nextId) => {
-                if (itemIds.has(nextId)) {
-                  const toItem = items.find((t) => t.id === nextId)!;
-                  arrows.push({ from: opened, to: toItem });
-                }
-              });
-            });
-          return arrows.map(({ from, to }) => {
-            const fp = cardPos(from.id);
-            const tp = cardPos(to.id);
-            const x1 = fp.x + CARD_SIZE;
-            const y1 = fp.y + CARD_SIZE / 2;
-            const x2 = tp.x;
-            const y2 = tp.y + CARD_SIZE / 2;
-            const cx = (x1 + x2) / 2;
-            return (
-              <path
-                key={`${from.id}-${to.id}`}
-                d={`M ${x1},${y1} C ${cx},${y1} ${cx},${y2} ${x2},${y2}`}
-                stroke="rgba(90,140,220,0.45)"
-                strokeWidth="1.5"
-                fill="none"
-                markerEnd="url(#arrowhead)"
-              />
-            );
-          });
-        })()}
+        {arrows.map(({ fromKey, toKey }) => {
+          const fp = cardPos(fromKey);
+          const tp = cardPos(toKey);
+          const x1 = fp.x + CARD_SIZE;
+          const y1 = fp.y + CARD_SIZE / 2;
+          const x2 = tp.x;
+          const y2 = tp.y + CARD_SIZE / 2;
+          const cx = (x1 + x2) / 2;
+          return (
+            <path
+              key={`${fromKey}-${toKey}`}
+              d={`M ${x1},${y1} C ${cx},${y1} ${cx},${y2} ${x2},${y2}`}
+              stroke="rgba(90,140,220,0.45)"
+              strokeWidth="1.5"
+              fill="none"
+              markerEnd="url(#arrowhead)"
+            />
+          );
+        })}
       </svg>
 
-      {/* Cards */}
       {items.map((item) => {
-        const { x, y } = cardPos(item.id);
+        const { x, y } = cardPos(item.key);
         const cls = [
           "tree-card",
           item.opened ? "opened" : "potential",
-          selectedCard === item.id ? "selected" : "",
+          selectedCard === item.cardId ? "selected" : "",
         ]
           .filter(Boolean)
           .join(" ");
         return (
           <div
-            key={item.id}
+            key={item.key}
             className={cls}
             style={{ left: x, top: y }}
-            onClick={() => onCardClick(item.id)}
-            title={item.id}
+            onClick={() => onCardClick(item.key)}
+            title={item.cardId}
           >
-            <span className="card-id">{item.id}</span>
+            <span className="card-id">{item.cardId}</span>
           </div>
         );
       })}
@@ -283,11 +284,17 @@ function buildInitialState(
   const initCard = cardMap.get(scenario.init);
   const discarded = new Set<string>(initCard?.discard ?? []);
   const items: TreeItem[] = [
-    { id: scenario.init, col: 0, opened: true, parentId: null },
+    { key: nextKey(), cardId: scenario.init, col: 0, opened: true, parentId: null },
   ];
-  initCard?.next?.forEach((nextId) => {
-    if (!discarded.has(nextId)) {
-      items.push({ id: nextId, col: 1, opened: false, parentId: scenario.init });
+  initCard?.next?.forEach((nextCardId) => {
+    if (!discarded.has(nextCardId)) {
+      items.push({
+        key: nextKey(),
+        cardId: nextCardId,
+        col: 1,
+        opened: false,
+        parentId: scenario.init,
+      });
     }
   });
   return { items, discarded };
@@ -310,57 +317,63 @@ function GameScreen({ scenario, scenarioDir, onBack }: GameScreenProps) {
     }
   }, [scenario.style]);
 
-  function handleCardClick(id: string) {
-    const item = treeItems.find((t) => t.id === id);
+  function handleCardClick(key: string) {
+    const item = treeItems.find((t) => t.key === key);
     if (!item) return;
     if (item.opened) {
-      setSelectedCard(id);
+      setSelectedCard(item.cardId);
       return;
     }
 
-    const card = cardMap.get(id);
+    const cardId = item.cardId;
+    const card = cardMap.get(cardId);
 
-    // Effective col at open time: max opened parent col + 1
-    let maxParentCol = -1;
-    treeItems.forEach((other) => {
-      if (other.opened && cardMap.get(other.id)?.next?.includes(id)) {
-        if (other.col > maxParentCol) maxParentCol = other.col;
-      }
-    });
-    const effectiveCol = maxParentCol >= 0 ? maxParentCol + 1 : item.col;
+    // Open at the clicked instance's displayed position: its parent's col + 1.
+    const parent = item.parentId
+      ? treeItems.find((t) => t.opened && t.cardId === item.parentId)
+      : null;
+    const effectiveCol = parent ? parent.col + 1 : item.col;
 
     // Compute newly discarded ids (skip those already opened)
     const newlyDiscarded = new Set<string>();
     card?.discard?.forEach((dId) => {
-      const dItem = treeItems.find((t) => t.id === dId);
-      if (!dItem?.opened) newlyDiscarded.add(dId);
+      const dOpened = treeItems.some((t) => t.opened && t.cardId === dId);
+      if (!dOpened) newlyDiscarded.add(dId);
     });
 
-    // Remove discarded items from tree, then mark this card as opened
+    // Remove discarded entries and sibling potentials of this cardId,
+    // then mark the clicked entry as opened in place.
     let updated = treeItems
-      .filter((t) => !newlyDiscarded.has(t.id))
+      .filter((t) => {
+        if (newlyDiscarded.has(t.cardId)) return false;
+        if (!t.opened && t.cardId === cardId && t.key !== key) return false;
+        return true;
+      })
       .map((t) =>
-        t.id === id ? { ...t, opened: true, col: effectiveCol } : t
+        t.key === key ? { ...t, opened: true, col: effectiveCol } : t
       );
 
-    // Add next cards as potential (skipping discarded)
+    // Add next cards as potential (one per link, skipping discarded
+    // and skipping next ids that are already opened — those just get arrows).
     const allDiscarded = new Set([...discarded, ...newlyDiscarded]);
-    const existingIds = new Set(updated.map((t) => t.id));
-    card?.next?.forEach((nextId) => {
-      if (!existingIds.has(nextId) && !allDiscarded.has(nextId)) {
-        updated.push({
-          id: nextId,
-          col: effectiveCol + 1,
-          opened: false,
-          parentId: id,
-        });
-        existingIds.add(nextId);
-      }
+    const openedCardIds = new Set(
+      updated.filter((t) => t.opened).map((t) => t.cardId)
+    );
+    card?.next?.forEach((nextCardId) => {
+      if (allDiscarded.has(nextCardId)) return;
+      if (openedCardIds.has(nextCardId)) return;
+      updated.push({
+        key: nextKey(),
+        cardId: nextCardId,
+        col: effectiveCol + 1,
+        opened: false,
+        parentId: cardId,
+      });
     });
 
     setTreeItems(updated);
     if (newlyDiscarded.size > 0) setDiscarded(allDiscarded);
-    setSelectedCard(id);
+    setSelectedCard(cardId);
   }
 
   const selectedCardData = selectedCard
@@ -380,7 +393,6 @@ function GameScreen({ scenario, scenarioDir, onBack }: GameScreenProps) {
         <div className="tree-wrapper">
           <Tree
             items={treeItems}
-            cardMap={cardMap}
             selectedCard={selectedCard}
             onCardClick={handleCardClick}
           />
